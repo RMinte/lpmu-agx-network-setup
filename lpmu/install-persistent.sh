@@ -34,4 +34,9 @@ else
     exit 1
 fi
 
+
+# 仅补充本项目转发规则及回程策略的开机恢复，不启用智能路由或监控。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+sudo "$SCRIPT_DIR/install-nat-service.sh"
+
 echo "=== 安装完成 ==="

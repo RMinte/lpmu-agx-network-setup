@@ -14,3 +14,7 @@
 # Temporary files
 *.tmp
 .*.swp
+
+# Python test artifacts
+__pycache__/
+*.pyc

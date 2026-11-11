@@ -1,460 +1,156 @@
-# LPMU和AGX网络配置指南
+# LPMU / AGX 网络配置
 
-## 📋 目录
+99（LPMU）为 97 的网页和 98（AGX）的模型等服务提供对外入口，并作为 98 的上网网关。
+固定内网地址保持为 `10.10.99.98/24`、`10.10.99.99/24`；上联网卡和上层 IPv4 地址可以变化。
 
-- [快速开始](#快速开始)
-- [概述](#概述)
-- [LPMU配置（网关）](#一lpmu配置作为网关)
-- [AGX配置（客户端）](#二agx配置客户端)
-- [测试网络](#三测试网络连接)
-- [故障排查](#四故障排查)
-- [目录结构](#目录结构)
+## 访问约定
 
-## 🚀 快速开始
+| 访问入口 | 实际服务 | 协议 |
+| --- | --- | --- |
+| 99 当前任意本机 IPv4 的 `57080` | 97 的网页 `80` | TCP |
+| 99 当前任意本机 IPv4 的 `58000–58999` | 98 的相同端口 | TCP、UDP |
+| 99 当前任意本机 IPv4 的 `58022` | 98 的 SSH `22` | TCP，优先于范围规则 |
+| 99 当前上层 IPv4 + Docker 已发布端口 | 99 本机 Docker 应用 | 由 Docker 原有映射决定 |
 
-### LPMU 配置（3步完成）
+UDP `58022` 仍到达 98 的 UDP `58022`。`59000` 不属于转给 98 的范围，仍可供 99 的应用使用。
+映射不代表每个端口都有服务，98 必须实际启动相应监听。
+
+上层网络和所有普通 Docker 网桥均可通过 99 的 `57080` 访问 97，并通过约定范围访问 98；规则不绑定 Octop、Docker 子网、USB 网卡名或某个上层 IP。
+例如，当前上层地址是 `10.27.141.129` 时：
+
+```text
+97 网页入口：  http://10.27.141.129:57080
+模型 Base URL：http://10.27.141.129:58000/v1
+模型列表：     http://10.27.141.129:58000/v1/models
+SSH 到 98：    ssh -p 58022 user@10.27.141.129
+```
+
+更换网络后，客户端改用 99 新获得的地址，端口约定保持一致，NAT 规则无需重建。
+规则不会自动修改应用中已经保存的旧 IP；服务器之间的应用配置可使用固定内网服务地址。
+`host` 模式共用 99 的网络，应直接使用 `10.10.99.97:80`、`10.10.99.98` 的服务端口或 SSH `22`；本项目不添加本地 OUTPUT 地址转换。
+
+## 在 99 上配置
+
+要求 Linux、Bash、iproute2、iptables（含 iptables-restore）、util-linux（flock）和 sudo/root。
+先确认连接 98 的内网接口 `enp2s0` 已有 `10.10.99.99/24`。设备接口不同需调整脚本中的内网接口常量。
+
+### 只配置转发，保留当前默认路由
 
 ```bash
-# 1. 传输文件
-scp -r lpmu/ user@10.10.99.99:~/network-setup/
-
-# 2. SSH 连接并配置
-ssh user@10.10.99.99
-cd ~/network-setup/lpmu
-chmod +x *.sh
-
-# 3. 一键配置（智能路由 + NAT）
-sudo ./setup-smart-route.sh
+cd lpmu
+sudo ./setup-nat.sh
+sudo ./test-nat.sh
 ```
 
-### AGX 配置（3步完成）
+`setup-nat.sh` 仅更新项目自己的 `LPMU_*` 链和跳转，不清空 NAT/FORWARD，不修改 FORWARD 默认策略或默认路由。
+Docker 的发布端口、隔离规则和其他已有规则保持原样；97 的网页入口和 98 的端口范围仅针对已转换目的地址的连接独立放行。过滤链排在既有 Docker/主机规则之后，因此已有的用户拒绝和隔离规则先执行。未匹配请求明确 RETURN，不等于全部放行。
+SNAT 保证 97/98 的转发服务回复经 99 返回；98 的外部访问使用 MASQUERADE。
+只给本项目转发连接的回复增加连接标记 `0x40000000/0x40000000`，并通过优先级 34 查询 main 的具体路由，忽略其默认路由。
+这使回复能找到所有动态 Docker 网桥；其他未标记流量和既有 `fwmark` 策略不受这条规则匹配。其他标记位保持原样；部署环境需为本项目保留该高位。
+优先级 34 若已有非本版本的规则会报错并保留原规则，由管理员手动处理；不自动兼容或删除未发布中间版本的策略规则。
+
+新脚本不自动删除历史转发规则。旧版错误方向的 `97:80 → 99:57080`、旧范围规则及快照冲突，在部署后手动处理。
+97 正确方向为 `99 当前地址:57080 → 10.10.99.97:80`，由 NAT 脚本统一配置；智能路由脚本不再创建原来的反向规则。
+脚本不会自动修复曾被旧版本清空的 Docker 规则。容器互联网访问仍由 Docker 原生的放行和 NAT 提供；首次部署时通过重启 Docker 等人工恢复操作重新生成，项目脚本负责保留这些规则。
+普通容器按实际路由出网，不绑定上层 IP 或某张 USB 网卡；明确设置为隔离的 Docker 网络保留隔离，应用已发布端口保持原样。
+
+### 智能选择默认出口（可选）
 
 ```bash
-# 1. 传输文件
-scp -r agx/ user@10.10.99.98:~/network-setup/
-
-# 2. SSH 连接并配置
-ssh user@10.10.99.98
-cd ~/network-setup/agx
-chmod +x *.sh
-
-# 3. 配置网络（推荐 Netplan）
-sudo ./setup-network-persistent-netplan.sh
+sudo ./setup-smart-route.sh           # 优先 enp2s0，不能联网时选择备用接口
+sudo ./setup-smart-route.sh --manual  # 手动选择
 ```
 
-### 测试连接
+智能路由的出口选择和切换代码保持仓库原有行为：切换时删除默认路由，再建立选中出口的 metric 100 默认路由。转发配置自身不执行这一操作。
+端口转发的入口选择与默认出口分开：metric 100 即使仍走 `10.10.99.100`，USB 上层网络也能访问转发服务。
+内网的 97、98、99、100 地址不变。97 的网页使用修正后的 `99:57080 → 97:80`，与选中的联网出口无关。
+
+### 安装开机恢复
 
 ```bash
-# 在 AGX 上测试网络
-ping -c 3 10.10.99.99   # 测试网关
-ping -c 3 8.8.8.8       # 测试互联网
-ping -c 3 google.com    # 测试DNS
-
-# 从外部网络测试端口转发
-ssh -p 58022 user@LPMU_IP  # SSH 访问 AGX
-```
-
----
-
-## 概述
-
-本配置方案让AGX (10.10.99.98) 通过LPMU (10.10.99.99) 访问互联网。
-
-### 网络拓扑
-```
-互联网
-  ↓
-LPMU (10.10.99.99)
-  ├─ enp2s0 (固定接口) ← 连接AGX
-  └─ WiFi/USB网卡 (动态) ← 连接互联网
-       ↓
-AGX (10.10.99.98)
-```
-
-### 智能路由特性
-
-- ✓ **优先使用 enp2s0**：首选有线连接
-- ✓ **自动故障转移**：enp2s0 失败时切换到 WiFi 等
-- ✓ **自动恢复**：enp2s0 恢复后自动切换回来
-- ✓ **自动配置 NAT**：一键完成路由和NAT配置
-- ✓ **持续监控**：每 30 秒检查网络状态
-
-### 端口转发特性
-
-- 🔌 **SSH 端口转发**：AGX:22 映射到 LPMU:58022
-- 🔌 **端口范围转发**：AGX:58000-58999 映射到 LPMU:58000-58999 (TCP/UDP)
-- 🔒 **远程管理**：通过 `ssh -p 58022 user@LPMU_IP` 访问 AGX
-
-## 一、LPMU配置（作为网关）
-
-### 快速部署（推荐）
-
-1. **将文件传输到LPMU**
-   ```bash
-   scp -r lpmu/ user@10.10.99.99:~/network-setup/
-   ```
-
-2. **SSH连接到LPMU**
-   ```bash
-   ssh user@10.10.99.99
-   cd ~/network-setup/lpmu
-   ```
-
-3. **赋予执行权限**
-   ```bash
-   chmod +x *.sh
-   ```
-
-4. **执行智能路由配置（一键完成）**
-   ```bash
-   sudo ./setup-smart-route.sh
-   ```
-   
-   这个脚本会自动：
-   - ✓ 检测 enp2s0 是否可用
-   - ✓ 如果不可用，自动选择其他可用接口
-   - ✓ 配置最优默认路由
-   - ✓ 测试互联网连接
-   - ✓ **自动配置 NAT 和防火墙规则**
-   - ✓ **自动配置端口转发（SSH:58022, 端口范围:58000-58999）**
-
-5. **在 AGX 上测试网络**
-   ```bash
-   ping 8.8.8.8
-   ping google.com
-   ```
-
-6. **测试端口转发（从外部网络）**
-   ```bash
-   # SSH 访问 AGX
-   ssh -p 58022 user@LPMU_IP
-   
-   # 测试端口范围（例如访问 AGX 上运行在 58080 的服务）
-   curl http://LPMU_IP:58080
-   ```
-
-### 安装为系统服务（推荐）
-
-安装智能路由系统服务后，LPMU 重启后会自动：
-- 选择最优网络接口
-- 配置 NAT 和防火墙
-- 持续监控网络状态
-- 自动故障转移和恢复
-
-```bash
-# 安装智能路由服务
 sudo ./install-smart-route-service.sh
-
-# 启动服务
+sudo systemctl start lpmu-nat.service
 sudo systemctl start lpmu-smart-route.service
 sudo systemctl start lpmu-smart-route-monitor.service
-
-# 查看状态
-sudo systemctl status lpmu-smart-route-monitor.service
-
-# 查看实时日志
-sudo journalctl -u lpmu-smart-route-monitor.service -f
 ```
 
-### 手动配置（不推荐）
+安装器将本目录脚本复制到 `/usr/local/bin/lpmu-*.sh` 并启用服务。
+后续修改仓库脚本后须重新运行安装器，才能更新服务所用的副本。
 
-如果只需要配置 NAT 而不需要智能路由：
+- `lpmu-nat.service`：独立建立端口转发，不依赖互联网 ping 成功；在 Docker 启动后执行，通过 `PartOf=docker.service` 在 Docker 由 systemd 重启时重新建立项目跳转顺序。
+- `lpmu-smart-route.service`：按既有策略选择联网出口。
+- `lpmu-smart-route-monitor.service`：监控并切换联网出口。
+
+`setup-nat.sh` 不自动保存整张 iptables 表。只需要转发开机恢复时使用：
 
 ```bash
-sudo ./setup-nat.sh
+sudo ./install-nat-service.sh
+sudo systemctl start lpmu-nat.service
 ```
 
-### 脚本说明
+这个入口只启用转发恢复，不启用智能路由或监控。
+原 `install-persistent.sh` 的软件包安装、IPv4/IPv6 规则保存行为保留，另外调用上述转发恢复安装器，确保重启后连接标记对应的策略规则也能恢复。
+保存全表快照仍可能包含 Docker 运行时地址；已有的 netfilter-persistent 和历史快照需由部署管理员核查，安装器不会擅自删除系统配置。
 
-#### `setup-smart-route.sh`（推荐使用）
-- 智能检测并选择最优网络接口
-- 优先使用 enp2s0，失败时自动切换
-- 配置路由表
-- **自动调用 setup-nat.sh 配置 NAT**
-- 测试互联网连接
+IPv4 转发持久化写入 `/etc/sysctl.d/90-lpmu-forward.conf`。
+隔离测试可使用 `setup-nat.sh --runtime-only`，只修改当前网络命名空间的转发状态和规则，不写持久化配置。
 
-#### `monitor-smart-route.sh`
-- 持续监控网络状态（30秒间隔）
-- 检测接口故障并自动切换
-- enp2s0 恢复时自动切换回来
-- 路由变更时自动重新配置 NAT
+## 在 98 上配置
 
-#### `setup-nat.sh`
-- 启用 IP 转发
-- 检测有互联网连接的接口
-- 配置 NAT (MASQUERADE)
-- 配置防火墙规则
-- **配置 SSH 端口转发（AGX:22 -> LPMU:58022）**
-- **配置端口范围转发（AGX:58000-58999 -> LPMU:58000-58999）**
-
-#### `install-smart-route-service.sh`
-- 将脚本安装为 systemd 服务
-- 开机自动启动
-- 自动监控网络变化
-
-## 二、AGX配置（客户端）
-
-### 快速部署
-
-1. **将文件传输到AGX**
-   ```bash
-   scp -r agx/ user@10.10.99.98:~/network-setup/
-   ```
-
-2. **SSH连接到AGX**
-   ```bash
-   ssh user@10.10.99.98
-   cd ~/network-setup/agx
-   ```
-
-3. **赋予执行权限**
-   ```bash
-   chmod +x *.sh
-   ```
-
-4. **检查并修改网络接口名称**
-   
-   查看当前接口：
-   ```bash
-   ip link show
-   ```
-   
-   编辑脚本中的 `NETWORK_IFACE` 变量，改为实际接口名（如 `eth0`、`enP1p1s0`等）
-
-5. **选择配置方式**
-
-   **方式A: 临时配置（重启后失效）**
-   ```bash
-   sudo ./setup-network.sh
-   ```
-
-   **方式B: 使用NetworkManager（推荐，适用于有NetworkManager的系统）**
-   ```bash
-   sudo ./setup-network-persistent-nm.sh
-   ```
-
-   **方式C: 使用Netplan（推荐，适用于Ubuntu 18.04+）**
-   ```bash
-   sudo ./setup-network-persistent-netplan.sh
-   ```
-
-### 脚本说明
-
-#### `setup-network.sh`
-- 配置静态IP: 10.10.99.98/24
-- 设置网关: 10.10.99.99
-- 配置DNS服务器
-- 测试网络连接
-- **重启后失效**
-
-#### `setup-network-persistent-nm.sh`
-- 使用NetworkManager创建持久化连接
-- 重启后自动生效
-- 适用于：Ubuntu Desktop, RHEL, CentOS等
-
-#### `setup-network-persistent-netplan.sh`
-- 使用Netplan配置
-- 创建 `/etc/netplan/01-lpmu-static.yaml`
-- 适用于：Ubuntu 18.04+, Ubuntu Server
-
-## 三、测试网络连接
-
-### 在AGX上测试
+98 的固定 IPv4 为 `10.10.99.98/24`，默认网关为 `10.10.99.99`。
+先查看接口名并修改所选脚本中的 `NETWORK_IFACE`：
 
 ```bash
-# 1. 测试到LPMU的连接
-ping -c 3 10.10.99.99
-
-# 2. 测试互联网连接（IP）
-ping -c 3 8.8.8.8
-
-# 3. 测试DNS解析
-ping -c 3 google.com
-
-# 4. 检查路由
-ip route show
-
-# 5. 检查DNS配置
-cat /etc/resolv.conf
+ip -br addr
+cd agx
+sudo ./setup-network-persistent-netplan.sh  # 使用 Netplan 的系统
+# 或：sudo ./setup-network-persistent-nm.sh # 使用 NetworkManager 的系统
+# 临时配置：sudo ./setup-network.sh
+sudo ./test-connection.sh
 ```
 
-### 在LPMU上检查
+这些 AGX 配置脚本会替换指定接口的地址/连接配置，请在部署阶段执行。
+99 的转发脚本不会修改 98 的网络设置。
+
+## 验收
+
+本机 `test-nat.sh` 检查规则存在及命中数；实际连通性必须分别从上层网络和容器验证：
 
 ```bash
-# 1. 检查IP转发是否启用
-cat /proc/sys/net/ipv4/ip_forward
-# 应该显示 1
+# 上层网络客户端：替换成 99 当前上层地址
+curl --noproxy '*' http://LPMU_IP:57080/
+curl --noproxy '*' http://LPMU_IP:58000/v1/models
+ssh -p 58022 user@LPMU_IP
 
-# 2. 检查NAT规则
-sudo iptables -t nat -L POSTROUTING -n -v
+# 在普通 Docker 容器中验证（镜像需要有 curl）
+docker exec CONTAINER curl --noproxy '*' http://LPMU_IP:58000/v1/models
 
-# 3. 检查FORWARD规则
-sudo iptables -L FORWARD -n -v
-
-# 4. 查看当前网络接口
-ip -brief addr show
+# 99 的 host 模式/本机进程直接访问 98
+curl --noproxy '*' http://10.10.99.98:58000/v1/models
 ```
 
-## 四、故障排查
+上层网络必须允许客户端连接到 99；若客户端跨网段，还需现有路由策略提供正确回程。
+本项目不替换设备已有的策略路由，新增的转发连接回程规则如上；上级网络防火墙由所在网络管理。IPv6 不在本次端口映射范围内。
 
-### AGX无法连接到互联网
+### 隔离集成测试
 
-1. **检查AGX到LPMU的连接**
-   ```bash
-   ping 10.10.99.99
-   ```
-   如果失败，检查物理连接和AGX的IP配置
-
-2. **在LPMU上检查IP转发**
-   ```bash
-   cat /proc/sys/net/ipv4/ip_forward
-   ```
-   应该显示 1
-
-3. **在LPMU上检查NAT规则**
-   ```bash
-   sudo iptables -t nat -L POSTROUTING -n -v
-   ```
-   应该看到MASQUERADE规则
-
-4. **在LPMU上测试互联网连接**
-   ```bash
-   ping -c 3 8.8.8.8
-   ```
-   确保LPMU本身可以访问互联网
-
-5. **在AGX上检查路由**
-   ```bash
-   ip route show
-   ```
-   应该有 `default via 10.10.99.99`
-
-### USB网卡插入后无法使用
-
-1. **在LPMU上检查新接口是否被识别**
-   ```bash
-   ip link show
-   ```
-
-2. **重新运行NAT配置**
-   ```bash
-   sudo /tmp/network-setup/lpmu/setup-nat.sh
-   ```
-
-3. **如果安装了监控服务，检查日志**
-   ```bash
-   sudo journalctl -u lpmu-nat-monitor.service -n 50
-   ```
-
-### DNS解析失败
-
-1. **检查AGX的DNS配置**
-   ```bash
-   cat /etc/resolv.conf
-   ```
-
-2. **手动测试DNS**
-   ```bash
-   nslookup google.com 8.8.8.8
-   ```
-
-3. **检查LPMU是否阻止了DNS流量**
-   ```bash
-   sudo iptables -L FORWARD -n -v
-   ```
-
-## 五、目录结构
-
-```
-network-setup/
-├── README.md                    # 本文件（完整文档）
-├── lpmu/                        # LPMU（网关）脚本
-│   ├── setup-smart-route.sh    # 智能路由配置（推荐使用）
-│   ├── monitor-smart-route.sh  # 路由监控
-│   ├── setup-nat.sh            # NAT配置
-│   ├── install-smart-route-service.sh  # 安装系统服务
-│   ├── install-persistent.sh   # iptables持久化
-│   └── test-nat.sh             # 测试NAT
-└── agx/                         # AGX（客户端）脚本
-    ├── setup-network.sh         # 临时网络配置
-    ├── setup-network-persistent-nm.sh    # NetworkManager持久化
-    ├── setup-network-persistent-netplan.sh  # Netplan持久化
-    └── test-connection.sh       # 测试连接
-```
-
-## 六、卸载配置
-
-### LPMU
+在 Linux 上执行，要求 root、iproute2、iptables、Python 3：
 
 ```bash
-# 停止并禁用服务
-sudo systemctl stop lpmu-nat-monitor.service
-sudo systemctl stop lpmu-nat.service
-sudo systemctl disable lpmu-nat-monitor.service
-sudo systemctl disable lpmu-nat.service
-
-# 删除服务文件
-sudo rm /etc/systemd/system/lpmu-nat*.service
-sudo rm /usr/local/bin/lpmu-*.sh
-
-# 清除iptables规则
-sudo iptables -t nat -F
-sudo iptables -F FORWARD
-
-# 禁用IP转发
-sudo sysctl -w net.ipv4.ip_forward=0
+sudo python3 tests/test_forwarding.py
 ```
 
-### AGX
+测试创建临时网络命名空间，模拟 99、97、98、上层网络和两个任意名称的 Docker 网桥。
+所有测试网卡、路由、防火墙规则均在隔离环境；退出时删除测试命名空间。
+覆盖 97 网页转发、TCP/UDP 范围边界、SSH 特例、多网桥访问、改名/换网段后无需重建规则、重复执行、保留旧规则供手动迁移、既有标记策略不变、低 metric 路由下的原有出口切换、保留默认路由、Docker 用户拒绝/隔离规则与既有发布端口、避免劫持其他服务器的相同端口，以及 host 直接访问 98。
+这是 Linux 网络栈集成测试，未自动启动真正的 Docker daemon，也不代替目标设备的重启验收。
+
+## 停用
 
 ```bash
-# 如果使用NetworkManager
-sudo nmcli connection delete lpmu-static
-
-# 如果使用Netplan
-sudo rm /etc/netplan/01-lpmu-static.yaml
-sudo netplan apply
-
-# 恢复DHCP（如果需要）
-sudo dhclient
+sudo systemctl disable --now lpmu-smart-route-monitor.service
+sudo systemctl disable --now lpmu-smart-route.service
+sudo systemctl disable --now lpmu-nat.service
 ```
 
-## 七、注意事项
-
-1. **安全性**：此配置允许AGX通过LPMU访问互联网，请确保两台机器的安全
-
-2. **防火墙**：如果LPMU或AGX有其他防火墙规则，可能需要调整
-
-3. **网络接口名称**：不同系统的网络接口命名可能不同，请根据实际情况修改脚本
-
-4. **权限**：所有配置脚本都需要root权限（sudo）
-
-5. **优先接口配置**：如需修改优先接口，编辑 `setup-smart-route.sh` 第7行：
-   ```bash
-   PRIMARY_IFACE="enp2s0"  # 改为你的接口名
-   ```
-
-## 八、常用命令
-
-```bash
-# LPMU - 查看NAT规则
-sudo iptables -t nat -L -n -v
-
-# LPMU - 查看FORWARD规则
-sudo iptables -L FORWARD -n -v
-
-# LPMU - 重启NAT配置
-sudo systemctl restart lpmu-nat.service
-
-# AGX - 查看网络配置
-ip addr show
-ip route show
-
-# AGX - 测试连接
-ping -c 3 10.10.99.99  # 测试网关
-ping -c 3 8.8.8.8      # 测试互联网
-ping -c 3 google.com   # 测试DNS
-
-# 查看实时日志
-sudo journalctl -u lpmu-nat-monitor.service -f
-```
+停止服务不会主动清除当前规则。如需删除本项目的转发，只删除 `LPMU_*` 跳转与链以及项目添加的优先级 34 规则；不要全局清空 iptables，以免破坏 Docker 和其他服务。

@@ -1,11 +1,10 @@
 #!/bin/bash
 
 # 智能路由配置脚本
-# 优先使用 enp2s0，如果无法联网则自动切换到其他接口
+# 优先使用 LPMU 内网接口，如果无法联网则自动切换到其他接口
 
 set -e
 
-PRIMARY_IFACE="enp2s0"
 TEST_HOST="8.8.8.8"
 TIMEOUT=3
 MANUAL_MODE=false
@@ -34,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lpmu-network.sh"
+PRIMARY_IFACE=$(lpmu_internal_interface)
 
 echo "=== LPMU 智能路由配置 ==="
 echo ""
@@ -237,21 +240,7 @@ fi
 if [ -n "$CHOSEN_IFACE" ]; then
     echo "4. 配置路由 - 使用接口: $CHOSEN_IFACE (网关: $CHOSEN_GATEWAY)"
     
-    # 删除所有默认路由
-    echo "   删除旧的默认路由..."
-    while sudo ip route del default 2>/dev/null; do
-        :
-    done
-    
-    # 添加选定的默认路由（最高优先级）
-    echo "   添加新的默认路由..."
-    sudo ip route add default via "$CHOSEN_GATEWAY" dev "$CHOSEN_IFACE" metric 100
-    
-    # 如果选定的不是主接口，为主接口添加低优先级路由（以便后续恢复）
-    if [ "$CHOSEN_IFACE" != "$PRIMARY_IFACE" ] && [ -n "$PRIMARY_GATEWAY" ]; then
-        echo "   为 $PRIMARY_IFACE 添加备用路由..."
-        sudo ip route add default via "$PRIMARY_GATEWAY" dev "$PRIMARY_IFACE" metric 200 2>/dev/null || true
-    fi
+    lpmu_select_default_route "$CHOSEN_IFACE" "$CHOSEN_GATEWAY"
     
     echo ""
     echo "5. 当前路由表："
@@ -269,7 +258,6 @@ if [ -n "$CHOSEN_IFACE" ]; then
         # 自动配置 NAT
         echo ""
         echo "7. 自动配置 NAT..."
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         if [ -f "$SCRIPT_DIR/setup-nat.sh" ]; then
             sudo "$SCRIPT_DIR/setup-nat.sh"
         elif [ -f "$SCRIPT_DIR/lpmu-setup-nat.sh" ]; then

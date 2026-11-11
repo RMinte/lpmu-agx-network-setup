@@ -8,6 +8,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+LAN_IFACE = os.environ.get("LPMU_TEST_LAN_IFACE", "enp2s0")
 PREFIX = f"lpmutest-{os.getpid()}"
 NAMES = {name: f"{PREFIX}-{name}" for name in ("gw", "switch", "agx", "web", "upper", "c1", "c2")}
 PROCESSES = []
@@ -82,8 +83,21 @@ def request(source, target, port, role, actual_port=None, protocol="tcp"):
 
 
 def install():
-    ns("gw", "bash", str(ROOT / "lpmu/setup-nat.sh"), "--runtime-only")
+    result = ns("gw", "bash", str(ROOT / "lpmu/setup-nat.sh"), "--runtime-only")
+    assert f"LPMU 内网接口：{LAN_IFACE} (10.10.99.99/24)" in result, result
     ns("gw", "bash", str(ROOT / "lpmu/test-nat.sh"))
+
+
+def check_unconfigured_lan(count):
+    before = [ns("gw", *command) for command in (("ip", "route", "show"), ("ip", "rule", "show"), ("iptables-save",))]
+    for script, options in (("setup-nat.sh", ("--runtime-only",)), ("setup-smart-route.sh", ()), ("monitor-smart-route.sh", ())):
+        denied = subprocess.run(
+            ["ip", "netns", "exec", NAMES["gw"], "bash", str(ROOT / "lpmu" / script), *options],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert denied.returncode != 0 and f"找到 {count} 个" in denied.stderr, denied
+    after = [ns("gw", *command) for command in (("ip", "route", "show"), ("ip", "rule", "show"), ("iptables-save",))]
+    assert before == after
 
 
 def check_paths(target):
@@ -107,13 +121,21 @@ def main():
             run("ip", "netns", "add", full)
             CREATED.append(full)
             ns(name, "ip", "link", "set", "lo", "up")
-        # Model the physical LAN switch outside 99, keeping enp2s0 a routed NIC.
+        # Model the physical LAN switch outside 99, keeping its LAN NIC routed.
         ns("switch", "ip", "link", "add", "lan", "type", "bridge")
         ns("switch", "ip", "link", "set", "lan", "up")
-        for name, hostdev, switchdev in (("gw", "enp2s0", "to-gw"), ("agx", "eth0", "to-agx"), ("web", "eth0", "to-web")):
+        for name, hostdev, switchdev in (("gw", LAN_IFACE, "to-gw"), ("agx", "eth0", "to-agx"), ("web", "eth0", "to-web")):
             link(name, hostdev, "switch", switchdev)
             ns("switch", "ip", "link", "set", switchdev, "master", "lan")
-        addr("gw", "enp2s0", "10.10.99.99/24")
+        other_iface = "enp2s0" if LAN_IFACE != "enp2s0" else "other-lan"
+        ns("gw", "ip", "link", "add", other_iface, "type", "bridge")
+        ns("gw", "ip", "link", "set", other_iface, "up")
+        check_unconfigured_lan(0)
+        addr("gw", LAN_IFACE, "10.10.99.99/24")
+        addr("gw", other_iface, "10.10.99.99/24")
+        check_unconfigured_lan(2)
+        ns("gw", "ip", "addr", "del", "10.10.99.99/24", "dev", other_iface)
+        print("PASS: absent and ambiguous LAN addresses rejected before routes or firewall changes")
         addr("web", "eth0", "10.10.99.97/24")
         ns("web", "ip", "route", "add", "default", "via", "10.10.99.99")
         addr("agx", "eth0", "10.10.99.98/24")
@@ -143,19 +165,19 @@ def main():
         # A pre-existing marked route to a specific prefix must remain authoritative.
         ns("gw", "ip", "route", "add", "198.18.0.0/24", "via", "10.10.99.100")
         ns("gw", "ip", "rule", "add", "priority", "60", "fwmark", "0x100", "lookup", "100")
-        marked_query=("ip", "route", "get", "198.18.0.10", "from", "10.10.99.98", "iif", "enp2s0", "mark", "0x100")
+        marked_query=("ip", "route", "get", "198.18.0.10", "from", "10.10.99.98", "iif", LAN_IFACE, "mark", "0x100")
         before_marked=ns("gw", *marked_query)
         # Representative legacy LPMU rules, Docker chains and unrelated 97 rule.
         ns("gw", "iptables-restore", "--version")
-        rules = '''*mangle
+        rules = f'''*mangle
 -A PREROUTING -s 10.10.99.98 -m conntrack --ctdir REPLY -j CONNMARK --restore-mark --nfmask 0x100 --ctmask 0x100
 -A PREROUTING -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark 0x100/0xffffffff
 COMMIT
 *nat
 :DOCKER - [0:0]
--A PREROUTING -i enp2s0 -p tcp --dport 58022 -j DNAT --to-destination 10.10.99.98:22
--A PREROUTING -i enp2s0 -p tcp --dport 58000:58999 -j DNAT --to-destination 10.10.99.98
--A PREROUTING -i enp2s0 -p udp --dport 58000:58999 -j DNAT --to-destination 10.10.99.98
+-A PREROUTING -i {LAN_IFACE} -p tcp --dport 58022 -j DNAT --to-destination 10.10.99.98:22
+-A PREROUTING -i {LAN_IFACE} -p tcp --dport 58000:58999 -j DNAT --to-destination 10.10.99.98
+-A PREROUTING -i {LAN_IFACE} -p udp --dport 58000:58999 -j DNAT --to-destination 10.10.99.98
 -A PREROUTING -i unplugged0 -p tcp --dport 58000:58999 -j DNAT --to-destination 10.10.99.98
 -A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
 -A DOCKER -p tcp --dport 8899 -j DNAT --to-destination 172.30.1.2:8899
@@ -210,13 +232,13 @@ COMMIT
         assert "--to-destination 10.10.99.99:57080" in legacy, legacy
         print("PASS: historical forwarding preserved for manual migration; unrelated marked route preserved")
         # Simulate the administrator's manual conflict cleanup after installing new scripts.
-        for iface in ("enp2s0", "unplugged0"):
+        for iface in (LAN_IFACE, "unplugged0"):
             for protocol in ("tcp", "udp"):
                 args=("iptables", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", protocol, "--dport", "58000:58999", "-j", "DNAT", "--to-destination", "10.10.99.98")
-                if iface == "enp2s0" or protocol == "tcp": ns("gw", *args)
-        ns("gw", "iptables", "-t", "nat", "-D", "PREROUTING", "-i", "enp2s0", "-p", "tcp", "--dport", "58022", "-j", "DNAT", "--to-destination", "10.10.99.98:22")
+                if iface == LAN_IFACE or protocol == "tcp": ns("gw", *args)
+        ns("gw", "iptables", "-t", "nat", "-D", "PREROUTING", "-i", LAN_IFACE, "-p", "tcp", "--dport", "58022", "-j", "DNAT", "--to-destination", "10.10.99.98:22")
         ns("gw", "iptables", "-t", "nat", "-D", "PREROUTING", "-d", "10.10.99.97", "-p", "tcp", "--dport", "80", "-j", "DNAT", "--to-destination", "10.10.99.99:57080")
-        internet_route = ns("gw", "ip", "route", "get", "203.0.113.1", "from", "10.10.99.98", "iif", "enp2s0")
+        internet_route = ns("gw", "ip", "route", "get", "203.0.113.1", "from", "10.10.99.98", "iif", LAN_IFACE)
         assert "via 192.0.2.10 dev usb-test" in internet_route, internet_route
         print("PASS: repeated install preserves default routes, existing USB policy, Docker chains, FORWARD policy and single hooks")
         # Existing Docker user policy must win over project forwarding.
@@ -251,18 +273,41 @@ COMMIT
         ns("upper", "ip", "route", "replace", "default", "via", "198.51.100.1")
         check_paths("198.51.100.1")
         print("PASS: uplink address/interface change requires no NAT rebuild")
-        # Execute the actual route-switch blocks with a lower-metric DHCP default.
-        for filename, start_text, end_text in (
-            ("setup-smart-route.sh", "    # 删除所有默认路由", '    echo "5. 当前路由表'),
-            ("monitor-smart-route.sh", "    # 删除所有默认路由", "    # 重新配置 NAT"),
-        ):
-            ns("gw", "ip", "route", "add", "default", "via", "10.10.99.100", "metric", "50")
-            source=(ROOT/"lpmu"/filename).read_text()
-            block=source[source.index(start_text):source.index(end_text)]
-            variables="CHOSEN_IFACE=replacement0; CHOSEN_GATEWAY=198.51.100.10; PRIMARY_IFACE=enp2s0; PRIMARY_GATEWAY=10.10.99.100; iface=replacement0; gateway=198.51.100.10; "
-            ns("gw", "bash", "-ec", variables+block)
-            assert "dev replacement0" in ns("gw", "ip", "route", "get", "8.8.8.8")
-        print("PASS: original route switching succeeds even with a metric 50 DHCP default")
+        # Both gateways can answer the script's connectivity probe in this
+        # isolated network. Drop only the primary's probe address to fail over.
+        ns("gw", "ip", "rule", "del", "priority", "100")
+        addr("agx", "lo", "8.8.8.8/32")
+        addr("upper", "lo", "8.8.8.8/32")
+        ns("gw", "ip", "route", "add", "default", "via", "10.10.99.100",
+           "dev", LAN_IFACE, "proto", "dhcp", "metric", "0")
+        ns("gw", "ip", "route", "add", "default", "via", "198.51.100.10",
+           "dev", "replacement0", "proto", "dhcp", "metric", "50")
+        original_defaults = set(ns("gw", "ip", "route", "show", "default").splitlines())
+        # Run the real entry point, keeping its NAT write inside the netns.
+        entry = r'''
+sudo() {
+    case "$1" in
+        */setup-nat.sh) "$1" --runtime-only ;;
+        *) "$@" ;;
+    esac
+}
+export -f sudo
+exec bash "$1"
+'''
+        def check_selection(iface):
+            result = ns("gw", "bash", "-ec", entry, "bash", str(ROOT / "lpmu/setup-smart-route.sh"))
+            assert f"当前使用接口: {iface}" in result, result
+            assert f"dev {iface}" in ns("gw", "ip", "route", "get", "8.8.8.8")
+            assert original_defaults <= set(ns("gw", "ip", "route", "show", "default").splitlines())
+            assert len(ns("gw", "ip", "route", "show", "default", "proto", "99").splitlines()) <= 1
+
+        check_selection(LAN_IFACE)
+        ns("agx", "ip", "addr", "del", "8.8.8.8/32", "dev", "lo")
+        check_selection("replacement0")
+        check_selection("replacement0")
+        addr("agx", "lo", "8.8.8.8/32")
+        check_selection(LAN_IFACE)
+        print("PASS: primary to backup and back, preserving all DHCP defaults including metric zero")
         print("All integration checks passed")
     finally:
         for proc in PROCESSES:

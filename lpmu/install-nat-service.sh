@@ -2,6 +2,7 @@
 # 只安装转发规则的开机恢复，不启用联网出口选择或监控。
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+sudo install -m 0644 "$SCRIPT_DIR/lpmu-network.sh" /usr/local/bin/lpmu-network.sh
 sudo cp "$SCRIPT_DIR/setup-nat.sh" /usr/local/bin/lpmu-setup-nat.sh
 sudo chmod +x /usr/local/bin/lpmu-setup-nat.sh
 sudo tee /etc/systemd/system/lpmu-nat.service > /dev/null <<'UNIT'

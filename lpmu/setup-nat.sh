@@ -11,8 +11,9 @@ esac
 [[ $# -le 1 ]] || { echo "参数过多" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || { echo "请使用 sudo 执行" >&2; exit 1; }
 
-INTERNAL_IFACE="enp2s0"
-INTERNAL_IP="10.10.99.99"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lpmu-network.sh"
+INTERNAL_IP="${LPMU_INTERNAL_CIDR%/*}"
 INTERNAL_NET="10.10.99.0/24"
 AGX_IP="10.10.99.98"
 WEB_IP="10.10.99.97"
@@ -22,14 +23,12 @@ RETURN_MARK="0x40000000/0x40000000"
 for command_name in ip iptables iptables-restore sysctl flock; do
     command -v "$command_name" >/dev/null || { echo "缺少命令: $command_name" >&2; exit 1; }
 done
-ip -4 -o addr show dev "$INTERNAL_IFACE" | awk '{print $4}' | grep -qx "$INTERNAL_IP/24" || {
-    echo "$INTERNAL_IFACE 必须已配置 $INTERNAL_IP/24" >&2
-    exit 1
-}
-
 # 防止开机服务与路由监控同时重建项目链。
 exec 9>/run/lpmu-network-setup.lock
 flock -x 9
+INTERNAL_IFACE=$(lpmu_internal_interface)
+echo "LPMU 内网接口：$INTERNAL_IFACE ($LPMU_INTERNAL_CIDR)"
+
 # 仅对本项目转发连接的回复优先查询具体路由，避免影响其他流量。
 # 标记只使用一个高位，保留既有 fwmark（例如 0x100）的其他位。
 existing_rule=$(ip -4 rule show priority "$AGX_LOCAL_RULE_PRIORITY")

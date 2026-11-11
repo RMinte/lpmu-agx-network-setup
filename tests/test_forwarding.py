@@ -273,18 +273,41 @@ COMMIT
         ns("upper", "ip", "route", "replace", "default", "via", "198.51.100.1")
         check_paths("198.51.100.1")
         print("PASS: uplink address/interface change requires no NAT rebuild")
-        # Execute the actual route-switch blocks with a lower-metric DHCP default.
-        for filename, start_text, end_text in (
-            ("setup-smart-route.sh", "    # 删除所有默认路由", '    echo "5. 当前路由表'),
-            ("monitor-smart-route.sh", "    # 删除所有默认路由", "    # 重新配置 NAT"),
-        ):
-            ns("gw", "ip", "route", "add", "default", "via", "10.10.99.100", "metric", "50")
-            source=(ROOT/"lpmu"/filename).read_text()
-            block=source[source.index(start_text):source.index(end_text)]
-            variables=f"CHOSEN_IFACE=replacement0; CHOSEN_GATEWAY=198.51.100.10; PRIMARY_IFACE={LAN_IFACE}; PRIMARY_GATEWAY=10.10.99.100; iface=replacement0; gateway=198.51.100.10; "
-            ns("gw", "bash", "-ec", variables+block)
-            assert "dev replacement0" in ns("gw", "ip", "route", "get", "8.8.8.8")
-        print("PASS: original route switching succeeds even with a metric 50 DHCP default")
+        # Both gateways can answer the script's connectivity probe in this
+        # isolated network. Drop only the primary's probe address to fail over.
+        ns("gw", "ip", "rule", "del", "priority", "100")
+        addr("agx", "lo", "8.8.8.8/32")
+        addr("upper", "lo", "8.8.8.8/32")
+        ns("gw", "ip", "route", "add", "default", "via", "10.10.99.100",
+           "dev", LAN_IFACE, "proto", "dhcp", "metric", "0")
+        ns("gw", "ip", "route", "add", "default", "via", "198.51.100.10",
+           "dev", "replacement0", "proto", "dhcp", "metric", "50")
+        original_defaults = set(ns("gw", "ip", "route", "show", "default").splitlines())
+        # Run the real entry point, keeping its NAT write inside the netns.
+        entry = r'''
+sudo() {
+    case "$1" in
+        */setup-nat.sh) "$1" --runtime-only ;;
+        *) "$@" ;;
+    esac
+}
+export -f sudo
+exec bash "$1"
+'''
+        def check_selection(iface):
+            result = ns("gw", "bash", "-ec", entry, "bash", str(ROOT / "lpmu/setup-smart-route.sh"))
+            assert f"当前使用接口: {iface}" in result, result
+            assert f"dev {iface}" in ns("gw", "ip", "route", "get", "8.8.8.8")
+            assert original_defaults <= set(ns("gw", "ip", "route", "show", "default").splitlines())
+            assert len(ns("gw", "ip", "route", "show", "default", "proto", "99").splitlines()) <= 1
+
+        check_selection(LAN_IFACE)
+        ns("agx", "ip", "addr", "del", "8.8.8.8/32", "dev", "lo")
+        check_selection("replacement0")
+        check_selection("replacement0")
+        addr("agx", "lo", "8.8.8.8/32")
+        check_selection(LAN_IFACE)
+        print("PASS: primary to backup and back, preserving all DHCP defaults including metric zero")
         print("All integration checks passed")
     finally:
         for proc in PROCESSES:

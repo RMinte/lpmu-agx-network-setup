@@ -240,21 +240,7 @@ fi
 if [ -n "$CHOSEN_IFACE" ]; then
     echo "4. 配置路由 - 使用接口: $CHOSEN_IFACE (网关: $CHOSEN_GATEWAY)"
     
-    # 删除所有默认路由
-    echo "   删除旧的默认路由..."
-    while sudo ip route del default 2>/dev/null; do
-        :
-    done
-    
-    # 添加选定的默认路由（最高优先级）
-    echo "   添加新的默认路由..."
-    sudo ip route add default via "$CHOSEN_GATEWAY" dev "$CHOSEN_IFACE" metric 100
-    
-    # 如果选定的不是主接口，为主接口添加低优先级路由（以便后续恢复）
-    if [ "$CHOSEN_IFACE" != "$PRIMARY_IFACE" ] && [ -n "$PRIMARY_GATEWAY" ]; then
-        echo "   为 $PRIMARY_IFACE 添加备用路由..."
-        sudo ip route add default via "$PRIMARY_GATEWAY" dev "$PRIMARY_IFACE" metric 200 2>/dev/null || true
-    fi
+    lpmu_select_default_route "$CHOSEN_IFACE" "$CHOSEN_GATEWAY"
     
     echo ""
     echo "5. 当前路由表："

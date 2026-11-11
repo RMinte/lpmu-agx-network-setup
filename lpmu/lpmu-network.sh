@@ -1,6 +1,8 @@
 #!/bin/bash
 
 LPMU_INTERNAL_CIDR="10.10.99.99/24"
+# Route protocol number used for the preferred default installed by this script.
+LPMU_ROUTE_PROTOCOL=99
 
 lpmu_internal_interface() {
     local addresses
@@ -21,4 +23,18 @@ lpmu_internal_interface() {
             print iface
         }
     ' <<< "$addresses"
+}
+
+lpmu_select_default_route() {
+    local iface="$1" gateway="$2" current
+    current=$(ip -4 route show default) || return
+    current=${current%%$'\n'*}
+    if [[ " $current " == *" via $gateway dev $iface "* ]]; then
+        return 0
+    fi
+
+    # Clear only the previous preference. Existing defaults keep their gateways
+    # and metrics, so a later run can still discover every available uplink.
+    sudo ip -4 route flush default proto "$LPMU_ROUTE_PROTOCOL" || return
+    sudo ip -4 route prepend default via "$gateway" dev "$iface" metric 0 proto "$LPMU_ROUTE_PROTOCOL"
 }

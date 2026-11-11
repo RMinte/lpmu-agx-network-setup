@@ -13,16 +13,16 @@ echo ""
 echo "1. 复制脚本到 /usr/local/bin/..."
 sudo cp "$SCRIPT_DIR/setup-smart-route.sh" /usr/local/bin/lpmu-setup-smart-route.sh
 sudo cp "$SCRIPT_DIR/monitor-smart-route.sh" /usr/local/bin/lpmu-monitor-smart-route.sh
-sudo cp "$SCRIPT_DIR/setup-nat.sh" /usr/local/bin/lpmu-setup-nat.sh
-sudo chmod +x /usr/local/bin/lpmu-*.sh
+sudo chmod +x /usr/local/bin/lpmu-setup-smart-route.sh /usr/local/bin/lpmu-monitor-smart-route.sh
+sudo "$SCRIPT_DIR/install-nat-service.sh"
 
 # 2. 创建启动时路由配置服务
 echo "2. 创建启动时路由配置服务..."
 sudo tee /etc/systemd/system/lpmu-smart-route.service > /dev/null <<'EOF'
 [Unit]
 Description=LPMU Smart Route Configuration
-After=network-online.target
-Wants=network-online.target
+After=network-online.target lpmu-nat.service
+Wants=network-online.target lpmu-nat.service
 
 [Service]
 Type=oneshot
@@ -68,6 +68,7 @@ echo ""
 echo "=== 安装完成 ==="
 echo ""
 echo "立即启动服务："
+echo "  sudo systemctl start lpmu-nat.service"
 echo "  sudo systemctl start lpmu-smart-route.service"
 echo "  sudo systemctl start lpmu-smart-route-monitor.service"
 echo ""
@@ -82,3 +83,4 @@ echo "禁用服务："
 echo "  sudo systemctl stop lpmu-smart-route-monitor.service"
 echo "  sudo systemctl disable lpmu-smart-route.service"
 echo "  sudo systemctl disable lpmu-smart-route-monitor.service"
+echo "  sudo systemctl disable --now lpmu-nat.service"

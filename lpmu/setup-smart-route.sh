@@ -272,31 +272,15 @@ if [ -n "$CHOSEN_IFACE" ]; then
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         if [ -f "$SCRIPT_DIR/setup-nat.sh" ]; then
             sudo "$SCRIPT_DIR/setup-nat.sh"
+        elif [ -f "$SCRIPT_DIR/lpmu-setup-nat.sh" ]; then
+            sudo "$SCRIPT_DIR/lpmu-setup-nat.sh"
         else
-            echo "   警告: 找不到 setup-nat.sh，请手动运行:"
-            echo "   sudo ./setup-nat.sh"
+            echo "找不到配套 NAT 脚本，请重新安装" >&2
+            exit 1
         fi
         
-        # 配置端口转发: 10.10.99.97:80 -> 选中接口:57080
-        echo ""
-        echo "8. 配置端口转发..."
-        CHOSEN_IP=$(get_ip_address "$CHOSEN_IFACE")
-        if [ -n "$CHOSEN_IP" ]; then
-            echo "   设置端口转发: 10.10.99.97:80 -> $CHOSEN_IP:57080"
-            
-            # 清除旧的端口转发规则
-            sudo iptables -t nat -D PREROUTING -d 10.10.99.97 -p tcp --dport 80 -j DNAT --to-destination "$CHOSEN_IP:57080" 2>/dev/null || true
-            sudo iptables -D FORWARD -d "$CHOSEN_IP" -p tcp --dport 57080 -j ACCEPT 2>/dev/null || true
-            
-            # 添加新的端口转发规则
-            sudo iptables -t nat -A PREROUTING -d 10.10.99.97 -p tcp --dport 80 -j DNAT --to-destination "$CHOSEN_IP:57080"
-            sudo iptables -A FORWARD -d "$CHOSEN_IP" -p tcp --dport 57080 -j ACCEPT
-            
-            echo "   ✓ 端口转发配置完成"
-            echo "   访问 http://10.10.99.97:80 将转发到 $CHOSEN_IP:57080"
-        else
-            echo "   ✗ 警告: 无法获取 $CHOSEN_IFACE 的 IP 地址，跳过端口转发配置"
-        fi
+        # 97/98 的端口转发由配套 NAT 脚本统一配置，与所选出口地址无关。
+        echo "97 网页入口：99 当前地址:57080 → 10.10.99.97:80"
     else
         echo ""
         echo "✗ 互联网连接失败"

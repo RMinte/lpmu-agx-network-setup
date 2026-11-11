@@ -1,11 +1,10 @@
 #!/bin/bash
 
 # 智能路由配置脚本
-# 优先使用 enp2s0，如果无法联网则自动切换到其他接口
+# 优先使用 LPMU 内网接口，如果无法联网则自动切换到其他接口
 
 set -e
 
-PRIMARY_IFACE="enp2s0"
 TEST_HOST="8.8.8.8"
 TIMEOUT=3
 MANUAL_MODE=false
@@ -34,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lpmu-network.sh"
+PRIMARY_IFACE=$(lpmu_internal_interface)
 
 echo "=== LPMU 智能路由配置 ==="
 echo ""
@@ -269,7 +272,6 @@ if [ -n "$CHOSEN_IFACE" ]; then
         # 自动配置 NAT
         echo ""
         echo "7. 自动配置 NAT..."
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         if [ -f "$SCRIPT_DIR/setup-nat.sh" ]; then
             sudo "$SCRIPT_DIR/setup-nat.sh"
         elif [ -f "$SCRIPT_DIR/lpmu-setup-nat.sh" ]; then

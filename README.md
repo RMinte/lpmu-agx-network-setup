@@ -32,7 +32,7 @@ SSH 到 98：    ssh -p 58022 user@10.27.141.129
 ## 在 99 上配置
 
 要求 Linux、Bash、iproute2、iptables（含 iptables-restore）、util-linux（flock）和 sudo/root。
-先确认连接 98 的内网接口 `enp2s0` 已有 `10.10.99.99/24`。设备接口不同需调整脚本中的内网接口常量。
+先确认连接 97 和 98 的内网接口已配置 `10.10.99.99/24`。脚本按这个地址识别接口，要求地址只配置在一个接口上。
 
 ### 只配置转发，保留当前默认路由
 
@@ -57,7 +57,7 @@ SNAT 保证 97/98 的转发服务回复经 99 返回；98 的外部访问使用 
 ### 智能选择默认出口（可选）
 
 ```bash
-sudo ./setup-smart-route.sh           # 优先 enp2s0，不能联网时选择备用接口
+sudo ./setup-smart-route.sh           # 优先 LPMU 内网接口，不能联网时选择备用接口
 sudo ./setup-smart-route.sh --manual  # 手动选择
 ```
 

@@ -3,7 +3,9 @@
 # 智能路由监控脚本
 # 持续监控网络状态，自动切换最优路由
 
-PRIMARY_IFACE="enp2s0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+source "$SCRIPT_DIR/lpmu-network.sh" || exit 1
+PRIMARY_IFACE=$(lpmu_internal_interface) || exit 1
 TEST_HOST="8.8.8.8"
 CHECK_INTERVAL=30  # 检查间隔（秒）
 TIMEOUT=3
@@ -47,7 +49,6 @@ switch_to_interface() {
         /usr/local/bin/lpmu-setup-nat.sh 2>&1 | grep -E "(MASQUERADE|FORWARD|接口)"
     else
         # 如果服务未安装，尝试本地脚本
-        SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
         if [ -f "$SCRIPT_DIR/setup-nat.sh" ]; then
             sudo "$SCRIPT_DIR/setup-nat.sh" 2>&1 | grep -E "(MASQUERADE|FORWARD|接口)"
         fi
